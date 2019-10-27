@@ -1,0 +1,283 @@
+#!/bin/bash
+
+##############################################################################
+#  autostream - this utility performs STREAM benchmarking using OpenMPI
+#  and GCC.
+#
+#  Usage: autostream [OPTIONS]...
+#
+#  Option          GNU long option         Meaning
+#   -h             --help                  Show this message.
+#
+#   -r             --rebuild               Force STREAM rebuild and
+#                                          installation.
+#
+#   -p             --prerequisites         Install prerequisites.
+#
+#   -I [value]     --iterations [value]    Set the number of iterations to run
+#                                          STREAM.
+#
+#   -t [range]     --taskset [range]       Set the core IDs to test.
+#                                          (e.g., 0,2,5,6-10)
+#
+#   -a             --auto-taskset          Automatically set the core ID range
+#                                          by the number of current OMP threads.
+#
+#   -s             --no-scale-up           Only do the max amount of cores.
+#
+#   -m [name]      --march [name]          Manually set the GCC machine
+#                                          architecture setting. Note: This will
+#                                          be -mcpu for Power systems.
+#
+#   -T [n]         --threads [n]           Override the number of threads to
+#                                          use.
+#
+##############################################################################
+#
+#  Last Updated:
+#     12/13/2016
+#
+#  Authors/Contributors:
+#     Ryan Spoone (ryanspoone@gmail.com)
+#
+##############################################################################
+
+############################################################
+# Make sure we are working in the this script's source
+# directory
+############################################################
+AUTO_SRM_DIR=$(cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd)
+cd "$AUTO_SRM_DIR" || exit
+export AUTO_SRM_DIR
+
+############################################################
+# Import sources
+############################################################
+# shellcheck disable=SC1091,SC1090
+source "$AUTO_SRM_DIR/lib/gcc_setup.sh"
+# shellcheck disable=SC1091,SC1090
+source "$AUTO_SRM_DIR/lib/system_information.sh"
+
+############################################################
+# Argument switch variables
+############################################################
+REBUILD=false
+PREREQUISITES=false
+ITERATIONS=2
+TASKSET_ENABLED=false
+TASKSET_AUTO=false
+TASKSET_RANGE=''
+SCALE=true
+OVERRIDE_THREADS=false
+THREADS=0
+OVERRIDE_MARCH=false
+MARCH=''
+
+############################################################
+# Warnings
+############################################################
+MAX_ARRAY_SIZE_WARNING=false
+
+############################################################
+# Argument parsing
+############################################################
+if [[ "$#" -gt 0 ]]; then
+  while [ "$1" ]; do
+    ARG="$1"
+    if [[ "$ARG" == "-p" || "$ARG" == "--prerequisites" ]]; then
+      PREREQUISITES=true
+      shift
+    elif [[ "$ARG" == "-r" || "$ARG" == "--rebuild" ]]; then
+      REBUILD=true
+      shift
+    elif [[ "$ARG" == "-I" || "$ARG" == "--iterations" ]]; then
+      ITERATIONS="$2"
+      shift
+      shift
+    elif [[ "$ARG" == "-t" || "$ARG" == "--taskset" ]]; then
+      TASKSET_ENABLED=true
+      TASKSET_RANGE="$2"
+      shift
+      shift
+    elif [[ "$ARG" == "-a" || "$ARG" == "--auto-taskset" ]]; then
+      TASKSET_AUTO=true
+      shift
+    elif [[ "$ARG" == "-s" || "$ARG" == "--no-scale-up" ]]; then
+      SCALE=false
+      shift
+    elif [[ "$ARG" == "-m" || "$ARG" == "--march" ]]; then
+      OVERRIDE_MARCH=true
+      MARCH="$2"
+      shift
+      shift
+    elif [[ "$ARG" == "-T" || "$ARG" == "--threads" ]]; then
+      OVERRIDE_THREADS=true
+      THREADS="$2"
+      SCALE=false
+      shift
+      shift
+    elif [[ "$ARG" == "-h" || "$ARG" == "--help" ]]; then
+      echo "Usage: autostream [OPTIONS]..."
+      echo
+      echo "Option          GNU long option         Meaning"
+      echo " -h             --help                  Show this message."
+      echo
+      echo " -r             --rebuild               Force STREAM rebuild and installation."
+      echo
+      echo " -p             --prerequisites         Install prerequisites."
+      echo
+      echo " -I [value]     --iterations [value]    Set the number of iterations to run"
+      echo "                                        STREAM."
+      echo
+      echo " -t [range]     --taskset [range]       Set the core IDs to test."
+      echo "                                        (e.g., 0,2,5,6-10)"
+      echo
+      echo " -a             --auto-taskset          Automatically set the core ID range by"
+      echo "                                        the number of current OMP threads."
+      echo
+      echo " -s             --no-scale-up           Only do the max amount of cores."
+      echo
+      echo " -m [name]      --march [name]          Manually set the GCC machine"
+      echo "                                        architecture setting. Note: This will"
+      echo "                                        be -mcpu for Power systems."
+      echo
+      echo " -T [n]         --threads [n]           Override the number of threads to"
+      echo "                                        use."
+      echo
+      exit
+    else
+      echo "autostream: invalid operand ‘$ARG’"
+      echo "Try 'autostream --help' for more information."
+      echo
+      echo "Usage: autostream [OPTIONS]..."
+      echo
+      echo "Option          GNU long option         Meaning"
+      echo " -h             --help                  Show this message."
+      echo
+      echo " -r             --rebuild               Force STREAM rebuild and installation."
+      echo
+      echo " -p             --prerequisites         Install prerequisites."
+      echo
+      echo " -I [value]     --iterations [value]    Set the number of iterations to run"
+      echo "                                        STREAM."
+      echo
+      echo " -t [range]     --taskset [range]       Set the core IDs to test."
+      echo "                                        (e.g., 0,2,5,6-10)"
+      echo
+      echo " -a             --auto-taskset          Automatically set the core ID range by"
+      echo "                                        the number of current OMP threads."
+      echo
+      echo " -s             --no-scale-up           Only do the max amount of cores."
+      echo
+      echo " -m [name]      --march [name]          Manually set the GCC machine"
+      echo "                                        architecture setting. Note: This will"
+      echo "                                        be -mcpu for Power systems."
+      echo
+      echo " -T [n]         --threads [n]           Override the number of threads to"
+      echo "                                        use."
+      echo
+      exit
+      exit
+    fi
+  done
+fi
+
+# export global variables
+export ITERATIONS
+export TASKSET_ENABLED
+export TASKSET_RANGE
+export TASKSET_AUTO
+export SCALE
+export OVERRIDE_MARCH
+export MARCH
+export OVERRIDE_THREADS
+export THREADS
+
+# Set environment stack size
+ulimit -s unlimited
+
+
+# Install prerequisites
+if [[ $PREREQUISITES == true ]]; then
+  gccPrerequisites
+fi
+# Get and set all required system information
+getSystemInfo
+
+
+# Display system information and warnings
+echo
+echo '*************************** System Information **************************'
+echo
+echo "CPU:                         $CPU"
+# shellcheck disable=SC2153
+echo "Architecture:                $ARCH bit"
+echo "OS:                          $OS $VER"
+echo
+
+if [[ $OVERRIDE_THREADS == true ]]; then
+  echo "Overriden Threads:           $THREADS"
+else
+  echo "Physical Processors:         $PHYSICAL_PROCESSORS"
+  echo "Total Logical Processors:    $LOGICAL_CORES"
+  echo "Cores Per Processor:         $CORES"
+  echo "System Core Count:           $TOTAL_CORES"
+fi
+echo
+echo "Total RAM:                   $RAM_GB GB"
+if [ ! -z "$TOTAL_CACHE" ]; then
+  echo "Total CPU system cache:      $TOTAL_CACHE bytes"
+fi
+echo
+echo '************************** Compiler Information *************************'
+echo
+echo "Compiler:                    GNU Compiler Collection (GCC) $GCC_VER"
+echo "-march=                      $MARCH"
+if [ -n "$MTUNE" ]; then
+  echo "-mtune=                      $MTUNE"
+fi
+echo "Array size:                  $STREAM_ARRAY_SIZE"
+echo "Iterations:                  $ITERATIONS"
+if [[ $TASKSET_ENABLED == true ]]; then
+  echo "Core IDs:                    $TASKSET_RANGE"
+fi
+
+echo
+echo '******************************* Warnings ********************************'
+if [[ $MAX_ARRAY_SIZE_WARNING == true ]] ; then
+  echo
+  echo "WARNING:  Array size may not fit into a 32-bit structure."
+  echo "If STREAM fails to compile, you may need to uncomment the"
+  echo "line in the script labeled and described by the \"Size"
+  echo "clamp code\" comments in the system_information.sh script."
+  echo
+else
+  echo
+  echo 'None.'
+  echo
+fi
+echo '*************************************************************************'
+echo
+echo 'Please exit now if this information is not correct. [Ctrl+C]'
+echo
+echo 'Otherwise, press [Enter] to continue...'
+echo
+echo '*************************************************************************'
+echo
+read -r
+
+############################################################
+# GCC setup
+############################################################
+if [[ $REBUILD == false ]]; then
+  gccBuild
+else
+  gccRebuild
+fi
+
+############################################################
+# Run
+############################################################
+gccRun
+
+exit
